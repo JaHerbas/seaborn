@@ -611,6 +611,15 @@ class VectorPlotter:
                 # Call the mapping function to initialize with default values
                 getattr(self, f"map_{var}")()
 
+        self.var_levels = {}
+        for var in self.variables:
+            # TODO what about x/y?
+            try:
+                map_obj = getattr(self, f"_{var}_map")
+                self.var_levels[var] = map_obj.levels
+            except AttributeError:
+                pass
+
     @classmethod
     def get_semantics(cls, kwargs):
         """Subset a dictionary` arguments with known semantic variables."""
@@ -874,6 +883,10 @@ class VectorPlotter:
         if isinstance(grouping_semantics, str):
             grouping_semantics = [grouping_semantics]
 
+        # Always insert faceting variables
+        facet_vars = {"col", "row"}
+        grouping_semantics.extend(facet_vars & set(self.variables))
+
         # Reduce to the semantics used in this plot
         grouping_semantics = [
             var for var in grouping_semantics if var in self.variables
@@ -892,9 +905,7 @@ class VectorPlotter:
 
             grouping_keys = []
             for var in grouping_semantics:
-                # TODO this is messy, add "semantic levels" property?
-                map_obj = getattr(self, f"_{var}_map")
-                grouping_keys.append(map_obj.levels)
+                grouping_keys.append(self.var_levels.get(var, []))
 
             iter_keys = itertools.product(*grouping_keys)
             if reverse:
@@ -930,7 +941,12 @@ class VectorPlotter:
 
             comp_data = self.plot_data.copy(deep=False)
             for var in "xy":
-                axis = getattr(self.ax, f"{var}axis")
+                # TODO here's a problem
+                if self.ax is None:
+                    ax = self.facets.axes.flat[0]
+                else:
+                    ax = self.ax
+                axis = getattr(ax, f"{var}axis")
                 comp_var = axis.convert_units(self.plot_data[var])
                 if axis.get_scale() == "log":
                     comp_var = np.log10(comp_var)
@@ -938,6 +954,19 @@ class VectorPlotter:
             self._comp_data = comp_data
 
         return self._comp_data
+
+    def _get_axes(self, sub_vars):
+
+        row = sub_vars.get("row", None)
+        col = sub_vars.get("col", None)
+        if row is not None and col is not None:
+            return self.facets.axes_dict[(row, col)]
+        elif row is not None:
+            return self.facets.axes_dict[row]
+        elif col is not None:
+            return self.facets.axes_dict[col]
+        else:
+            return self.ax
 
     def _attach(self, ax, allowed_types=None, log_scale=None):
         """Associate the plotter with a matplotlib Axes and initialize its units.
@@ -955,6 +984,21 @@ class VectorPlotter:
             arguments for the x and y axes.
 
         """
+        from .axisgrid import FacetGrid
+        # TODO change ax to a more generic name
+        if isinstance(ax, FacetGrid):
+            self.ax = None
+            self.facets = ax
+            ax_list = ax.axes.flat
+            if ax.col_names is not None:
+                self.var_levels["col"] = ax.col_names
+            if ax.row_names is not None:
+                self.var_levels["row"] = ax.row_names
+        else:
+            self.ax = ax
+            self.facets = None
+            ax_list = [ax]
+
         if allowed_types is None:
             # TODO should we define this default somewhere?
             allowed_types = ["numeric", "datetime", "categorical"]
@@ -974,11 +1018,12 @@ class VectorPlotter:
 
             # Register with the matplotlib unit conversion machinery
             # TODO do we want to warn or raise if mixing units?
-            axis = getattr(ax, f"{var}axis")
-            seed_data = self.plot_data[var]
-            if var_type == "categorical":
-                seed_data = categorical_order(seed_data)
-            axis.update_units(seed_data)
+            for ax in ax_list:
+                axis = getattr(ax, f"{var}axis")
+                seed_data = self.plot_data[var]
+                if var_type == "categorical":
+                    seed_data = categorical_order(seed_data)
+                axis.update_units(seed_data)
 
         # Possibly log-scale one or both axes
         if log_scale is not None:
@@ -991,13 +1036,12 @@ class VectorPlotter:
 
             for axis, scale in zip("xy", (scalex, scaley)):
                 if scale:
-                    set_scale = getattr(ax, f"set_{axis}scale")
-                    if scale is True:
-                        set_scale("log")
-                    else:
-                        set_scale("log", **{f"base{axis}": scale})
-
-        self.ax = ax
+                    for ax in ax_list:
+                        set_scale = getattr(ax, f"set_{axis}scale")
+                        if scale is True:
+                            set_scale("log")
+                        else:
+                            set_scale("log", **{f"base{axis}": scale})
 
     def _add_axis_labels(self, ax, default_x="", default_y=""):
         """Add axis labels from internal variable names if not already existing."""
